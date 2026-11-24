@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<style>
+*{box-sizing:border-box;user-select:none;-webkit-user-select:none}
+body{margin:0;overflow:hidden;background:#111;font-family:sans-serif;touch-action:none}
+#hud{position:fixed;top:10px;right:10px;background:#000a;color:#0f0;padding:8px 12px;border-radius:6px;z-index:10;font-size:13px}
+#hp{position:fixed;top:48px;right:10px;width:160px;height:14px;background:#000a;border:1px solid #fff5;border-radius:6px;overflow:hidden;z-index:10}
+#hp div{width:100%;height:100%;background:#2ecc71}
+#mic-btn{position:fixed;top:10px;left:10px;padding:8px 14px;border:none;border-radius:8px;background:#34495e;color:#fff;font-weight:bold;z-index:25;font-size:13px}
+#mic-btn.on{background:#27ae60}
+#aim{position:fixed;top:50%;left:50%;width:14px;height:14px;transform:translate(-50%,-50%);border:2px solid #fff;border-radius:50%;pointer-events:none;z-index:10}
+#joy{position:fixed;bottom:25px;left:25px;width:115px;height:115px;border-radius:50%;background:#fff2;border:2px solid #fff5;z-index:20}
+#knob{position:relative;top:32px;left:32px;width:50px;height:50px;border-radius:50%;background:#fff9}
+#fire{position:fixed;bottom:115px;right:25px;width:72px;height:72px;border-radius:50%;background:#e74c3cb3;border:2px solid #fff;color:#fff;font-weight:bold;z-index:20}
+#jump{position:fixed;bottom:35px;right:28px;width:62px;height:62px;border-radius:50%;background:#0099ffb3;border:2px solid #fff;color:#fff;font-weight:bold;z-index:20}
+</style>
+</head>
+<body>
+<div id="hud">جاري الاتصال...</div>
+<div id="hp"><div></div></div>
+<button id="mic-btn">المايك: مغلق</button>
+<div id="aim"></div>
+<div id="joy"><div id="knob"></div></div>
+<button id="fire">إطلاق</button>
+<button id="jump">قفز</button>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const hud=document.getElementById("hud"),hpBar=document.querySelector("#hp div"),aim=document.getElementById("aim"),micBtn=document.getElementById("mic-btn");
+let myId=null,other={},boxMeshes=[],boxes=[];
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x87ceeb);scene.fog=new THREE.Fog(0x87ceeb,20,95);
+const cam=new THREE.PerspectiveCamera(75,innerWidth/innerHeight,0.1,1000);
+const ren=new THREE.WebGLRenderer({antialias:true});ren.setSize(innerWidth,innerHeight);document.body.appendChild(ren.domElement);
+scene.add(cam);
+const gun=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.09,0.55),new THREE.MeshLambertMaterial({color:0x222222}));
+gun.position.set(0.26,-0.22,-0.45);cam.add(gun);
+let recoil=0;
+scene.add(new THREE.AmbientLight(0xffffff,0.7));
+const dl=new THREE.DirectionalLight(0xffffff,0.8);dl.position.set(30,50,20);scene.add(dl);
+const gnd=new THREE.Mesh(new THREE.PlaneGeometry(120,120),new THREE.MeshLambertMaterial({color:0x3b4d3b}));
+gnd.rotation.x=-Math.PI/2;scene.add(gnd);
+scene.add(new THREE.GridHelper(120,60,0x222222,0x2a382a));
+const bMat=new THREE.MeshLambertMaterial({color:0x8b5a2b});
+function addBox(b){const m=new THREE.Mesh(new THREE.BoxGeometry(b.w,b.h,b.d),bMat);m.position.set(b.x,b.y,b.z);scene.add(m);boxMeshes.push(m);boxes.push(b)}
+function addPl(p){const g=new THREE.Group();g.userData.pid=p.id;const b=new THREE.Mesh(new THREE.BoxGeometry(0.85,1.6,0.85),new THREE.MeshLambertMaterial({color:p.color}));b.position.y=0.8;b.userData.pid=p.id;g.add(b);const h=new THREE.Mesh(new THREE.BoxGeometry(0.55,0.55,0.55),new THREE.MeshLambertMaterial({color:0xf1c27d}));h.position.y=1.9;h.userData.pid=p.id;g.add(h);g.position.set(p.x,0,p.z);scene.add(g);return g}
+function setHp(v){hpBar.style.width=v+"%";hpBar.style.background=v>60?"#2ecc71":v>30?"#f39c12":"#e74c3c"}
+function tracer(a,b,c){const l=new THREE.Line(new THREE.BufferGeometry().setFromPoints([a.clone(),b.clone()]),new THREE.LineBasicMaterial({color:c||0xffff00}));scene.add(l);setTimeout(()=>scene.remove(l),80)}
+
+// إعداد المايك والصوت المباشر عبر WebRTC
+let localStream=null,micEnabled=false;
+const peers={};
+const rtcConfig={iceServers:[{urls:"stun:stun.l.google.com:19302"}]};
+
+function createPeer(peerId,isCaller){
+  if(peers[peerId])return peers[peerId];
+  const pc=new RTCPeerConnection(rtcConfig);
+  peers[peerId]=pc;
+  if(localStream){
+    localStream.getTracks().forEach(track=>pc.addTrack(track,localStream));
+  }
+  pc.onicecandidate=e=>{
+    if(e.candidate&&ws.readyState===1){
+      ws.send(JSON.stringify({type:"rtc-signal",targetId:peerId,signal:{candidate:e.candidate}}));
+    }
+  };
+  pc.ontrack=e=>{
+    let audioEl=document.getElementById("audio_"+peerId);
+    if(!audioEl){
+      audioEl=document.createElement("audio");
+      audioEl.id="audio_"+peerId;
+      audioEl.autoplay=true;
+      audioEl.playsInline=true;
+      document.body.appendChild(audioEl);
+    }
+    audioEl.srcObject=e.streams[0];
+  };
+  if(isCaller){
+    pc.createOffer().then(offer=>pc.setLocalDescription(offer)).then(()=>{
+      if(ws.readyState===1){
+        ws.send(JSON.stringify({type:"rtc-signal",targetId:peerId,signal:{sdp:pc.localDescription}}));
+      }
+    });
+  }
+  return pc;
+}
+
+micBtn.addEventListener("click",async()=>{
+  try{
+    if(!localStream){
+      localStream=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+      for(let pid in other){
+        const pc=createPeer(pid,true);
+        localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+      }
+    }
+    micEnabled=!micEnabled;
+    localStream.getAudioTracks().forEach(t=>t.enabled=micEnabled);
+    micBtn.innerText=micEnabled?"المايك: يعمل":"المايك: مكتوم";
+    micBtn.classList.toggle("on",micEnabled);
+  }catch(err){
+    alert("تعذر تشغيل المايك (تأكد من السماح بالمايك أو استخدام HTTPS)");
+  }
+});
+
+const ws=new WebSocket((location.protocol==="https:"?"wss:":"ws:")+"//"+location.host);
+const pl={x:0,y:1.6,z:0,ry:0,rx:0,vy:0,onGround:true};
+ws.onopen=()=>{hud.innerText="متصل | اللاعبون: 1"};
+ws.onmessage=async ev=>{
+  const d=JSON.parse(ev.data);
+  if(d.type==="init"){
+    myId=d.id;const me=d.players[myId];pl.x=me.x;pl.y=me.y;pl.z=me.z;setHp(me.hp);
+    d.boxes.forEach(addBox);
+    for(let k in d.players)if(k!==myId){other[k]=addPl(d.players[k]);createPeer(k,true)}
+    hud.innerText="متصل | اللاعبون: "+(Object.keys(other).length+1);
+  }else if(d.type==="playerJoined"){
+    if(d.player.id!==myId){other[d.player.id]=addPl(d.player);hud.innerText="متصل | اللاعبون: "+(Object.keys(other).length+1)}
+  }else if(d.type==="playerMoved"){
+    if(other[d.id]){other[d.id].position.set(d.x,d.y-1.6,d.z);other[d.id].rotation.y=d.ry}
+  }else if(d.type==="shotFired"){
+    tracer(new THREE.Vector3(d.origin.x,d.origin.y,d.origin.z),new THREE.Vector3(d.end.x,d.end.y,d.end.z),0xffaa00);
+  }else if(d.type==="playerHit"){
+    if(d.targetId===myId)setHp(d.hp);
+    else if(d.shooterId===myId){aim.style.borderColor="#ff3b30";setTimeout(()=>aim.style.borderColor="#fff",120)}
+  }else if(d.type==="playerRespawn"){
+    if(d.targetId===myId){pl.x=d.x;pl.y=d.y;pl.z=d.z;pl.vy=0;setHp(d.hp)}
+    else if(other[d.targetId])other[d.targetId].position.set(d.x,0,d.z);
+  }else if(d.type==="rtc-signal"){
+    const pc=createPeer(d.fromId,false);
+    if(d.signal.sdp){
+      await pc.setRemoteDescription(new RTCSessionDescription(d.signal.sdp));
+      if(d.signal.sdp.type==="offer"){
+        const ans=await pc.createAnswer();
+        await pc.setLocalDescription(ans);
+        ws.send(JSON.stringify({type:"rtc-signal",targetId:d.fromId,signal:{sdp:pc.localDescription}}));
+      }
+    }else if(d.signal.candidate){
+      await pc.addIceCandidate(new RTCIceCandidate(d.signal.candidate));
+    }
+  }else if(d.type==="playerLeft"){
+    if(other[d.id]){scene.remove(other[d.id]);delete other[d.id];hud.innerText="متصل | اللاعبون: "+(Object.keys(other).length+1)}
+    if(peers[d.id]){peers[d.id].close();delete peers[d.id]}
+    const au=document.getElementById("audio_"+d.id);if(au)au.remove();
+  }
+};
+
+let lastShot=0;
+function shoot(){const n=Date.now();if(n-lastShot<220)return;lastShot=n;recoil=0.08;const rc=new THREE.Raycaster();rc.setFromCamera(new THREE.Vector2(0,0),cam);rc.far=90;const em=[];for(let k in other)other[k].traverse(o=>{if(o.isMesh)em.push(o)});const bh=rc.intersectObjects(boxMeshes,false),eh=rc.intersectObjects(em,false);const bd=bh.length?bh[0].distance:Infinity,ed=eh.length?eh[0]:null;let hitPlayerId=null,endPt=rc.ray.origin.clone().add(rc.ray.direction.clone().multiplyScalar(Math.min(bd,75)));if(ed&&ed.distance<bd){hitPlayerId=ed.object.userData.pid||null;endPt=ed.point.clone()}const mw=new THREE.Vector3();gun.getWorldPosition(mw);tracer(mw,endPt,0xfff066);if(ws.readyState===1)ws.send(JSON.stringify({type:"shoot",origin:{x:mw.x,y:mw.y,z:mw.z},end:{x:endPt.x,y:endPt.y,z:endPt.z},hitPlayerId}))}
+document.getElementById("fire").addEventListener("touchstart",e=>{e.preventDefault();shoot()});
+document.getElementById("fire").addEventListener("mousedown",shoot);
+let mf=0,mr=0,jid=null;const jz=document.getElementById("joy"),kb=document.getElementById("knob");
+jz.addEventListener("touchstart",e=>{e.preventDefault();jid=e.changedTouches[0].identifier});
+jz.addEventListener("touchmove",e=>{e.preventDefault();for(let t of e.changedTouches)if(t.identifier===jid){const r=jz.getBoundingClientRect(),cx=r.left+r.width/2,cy=r.top+r.height/2;let dx=t.clientX-cx,dy=t.clientY-cy;const dist=Math.min(Math.hypot(dx,dy),38),ang=Math.atan2(dy,dx);kb.style.transform="translate("+Math.cos(ang)*dist+"px,"+Math.sin(ang)*dist+"px)";mr=(Math.cos(ang)*dist)/38;mf=-(Math.sin(ang)*dist)/38}});
+const rj=e=>{for(let t of e.changedTouches)if(t.identifier===jid){jid=null;kb.style.transform="translate(0px,0px)";mf=0;mr=0}};
+jz.addEventListener("touchend",rj);jz.addEventListener("touchcancel",rj);
+let lid=null,lx=0,ly=0;
+ren.domElement.addEventListener("touchstart",e=>{for(let t of e.changedTouches)if(lid===null){lid=t.identifier;lx=t.clientX;ly=t.clientY}});
+ren.domElement.addEventListener("touchmove",e=>{for(let t of e.changedTouches)if(t.identifier===lid){const dx=t.clientX-lx,dy=t.clientY-ly;pl.ry-=dx*0.006;pl.rx=Math.max(-1.2,Math.min(1.2,pl.rx-dy*0.006));lx=t.clientX;ly=t.clientY}});
+ren.domElement.addEventListener("touchend",e=>{for(let t of e.changedTouches)if(t.identifier===lid)lid=null});
+document.getElementById("jump").addEventListener("touchstart",e=>{e.preventDefault();if(pl.onGround){pl.vy=0.22;pl.onGround=false}});
+function collide(nx,nz){const rad=0.5;if(Math.abs(nx)>58||Math.abs(nz)>58)return true;for(let b of boxes)if(pl.y-1.6<b.h-0.2&&nx>b.x-b.w/2-rad&&nx<b.x+b.w/2+rad&&nz>b.z-b.d/2-rad&&nz<b.z+b.d/2+rad)return true;return false}
+let lastSend=0;
+function loop(){requestAnimationFrame(loop);const sp=0.14,s=Math.sin(pl.ry),c=Math.cos(pl.ry),vx=(-s*mf+c*mr)*sp,vz=(-c*mf-s*mr)*sp;if(!collide(pl.x+vx,pl.z))pl.x+=vx;if(!collide(pl.x,pl.z+vz))pl.z+=vz;pl.y+=pl.vy;if(pl.y>1.6)pl.vy-=0.012;else{pl.y=1.6;pl.vy=0;pl.onGround=true}recoil=Math.max(0,recoil-0.012);gun.position.z=-0.45+recoil;cam.position.set(pl.x,pl.y,pl.z);cam.rotation.order="YXZ";cam.rotation.y=pl.ry;cam.rotation.x=pl.rx;const now=Date.now();if(myId&&ws.readyState===1&&now-lastSend>40){ws.send(JSON.stringify({type:"move",x:pl.x,y:pl.y,z:pl.z,ry:pl.ry}));lastSend=now}ren.render(scene,cam)}
+loop();
+addEventListener("resize",()=>{cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix();ren.setSize(innerWidth,innerHeight)});
+</script>
+</body>
+</html>
